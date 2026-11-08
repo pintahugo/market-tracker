@@ -49,6 +49,39 @@ def format_dividend(val):
     pct = val * 100 if val < 0.3 else val
     return f"{pct:.2f} %"
 
+def map_recommendation(rec_key):
+    """
+    Kääntää analyytikoiden konsensus-suosituksen suomeksi:
+    OSTA / LISÄÄ / PIDÄ / VÄHENNÄ / MYY
+    """
+    if not rec_key:
+        return ("N/A", "dim")
+    
+    key = str(rec_key).lower().replace("_", "").replace(" ", "")
+    
+    if "strongbuy" in key:
+        return ("OSTA (Vahva)", "bold green")
+    elif "buy" in key:
+        return ("OSTA", "bold green")
+    elif "outperform" in key or "overweight" in key:
+        return ("LISÄÄ", "green")
+    elif "hold" in key or "neutral" in key:
+        return ("PIDÄ", "yellow")
+    elif "underperform" in key or "underweight" in key:
+        return ("VÄHENNÄ", "bright_red")
+    elif "sell" in key:
+        return ("MYY", "bold red")
+    
+    return (str(rec_key).upper(), "white")
+
+def format_target_price(target, current_price, currency="EUR"):
+    if target is None or current_price is None or current_price <= 0:
+        return "N/A"
+    curr_symbol = "€" if currency in ["EUR", "eur"] else ("$" if currency in ["USD", "usd"] else currency)
+    upside = ((target - current_price) / current_price) * 100
+    color = "green" if upside >= 0 else "red"
+    return f"{target:.2f} {curr_symbol} ([{color}]{upside:+.1f}%[/{color}])"
+
 def fetch_stock_data(symbol):
     import yfinance as yf
     ticker = yf.Ticker(symbol)
@@ -117,13 +150,15 @@ def print_rich_table(stock_items):
     console.print(Panel(header_text, border_style="cyan"))
 
     # Taulukko
-    table = Table(title="Osakekurssit ja keskeiset kertoimet", border_style="bright_black", header_style="bold bright_white")
+    table = Table(title="Osakekurssit, suositukset ja keskeiset kertoimet", border_style="bright_black", header_style="bold bright_white")
 
     table.add_column("Symboli", style="bold white", no_wrap=True)
     table.add_column("Yhtiö", style="cyan")
     table.add_column("Markkina", style="dim")
     table.add_column("Hinta", justify="right", style="bold white")
     table.add_column("Päivän muutos", justify="right")
+    table.add_column("Suositus", justify="center")
+    table.add_column("Tavoitehinta", justify="right")
     table.add_column("P/E (TTM)", justify="right")
     table.add_column("Fwd P/E", justify="right")
     table.add_column("Markkina-arvo", justify="right")
@@ -148,6 +183,13 @@ def print_rich_table(stock_items):
         else:
             chg_str = "N/A"
 
+        # Suositus (Osta/Myy/Lisää/Vähennä/Pidä)
+        rec_text, rec_color = map_recommendation(item.get("recommendation"))
+        rec_str = f"[{rec_color}]{rec_text}[/{rec_color}]"
+
+        # Tavoitehinta ja nousuvara
+        target_str = format_target_price(item.get("target_price"), item.get("price"), curr)
+
         pe_str = format_pe(item.get("trailing_pe"))
         fwd_pe_str = format_pe(item.get("forward_pe"))
         mcap_str = format_market_cap(item.get("market_cap"), curr)
@@ -160,7 +202,7 @@ def print_rich_table(stock_items):
         else:
             range52 = "N/A"
 
-        table.add_row(sym, name, ex, price_str, chg_str, pe_str, fwd_pe_str, mcap_str, div_str, range52)
+        table.add_row(sym, name, ex, price_str, chg_str, rec_str, target_str, pe_str, fwd_pe_str, mcap_str, div_str, range52)
 
     console.print(table)
     console.print()
@@ -179,18 +221,23 @@ def print_detail_view(symbol):
     color = "green" if (chg_pct and chg_pct >= 0) else "red"
     sign = "+" if (chg_pct and chg_pct >= 0) else ""
 
+    rec_text, rec_color = map_recommendation(data.get("recommendation"))
+    target_str = format_target_price(data.get("target_price"), data.get("price"), curr)
+
     panel_content = f"""
 [bold white]{data['name']} ({symbol})[/bold white]
 Hinta: [bold]{format_currency(data['price'], curr)}[/bold]  Muutos: [{color}]{sign}{chg_pct:.2f}%[/{color}]
 Markkina-arvo: {format_market_cap(data['market_cap'], curr)}
+
+[bold cyan]Konsensus-suositus & Tavoitehinta:[/bold cyan]
+• Suositus: [{rec_color}]{rec_text}[/{rec_color}]
+• Analyytikkojen tavoitehinta: {target_str}
 
 [bold cyan]Arvostuskertoimet:[/bold cyan]
 • P/E (toteutunut TTM): {format_pe(data['trailing_pe'])}
 • Forward P/E (ennustettu): {format_pe(data['forward_pe'])}
 • Osinkotuotto: {format_dividend(data['dividend_yield'])}
 • 52 viikon vaihteluväli: {format_currency(data['fifty_two_low'], curr)} - {format_currency(data['fifty_two_high'], curr)}
-• Analyytikkojen tavoitehinta: {format_currency(data['target_price'], curr)}
-• Konsensus-suositus: [bold]{(data.get('recommendation') or 'N/A').upper()}[/bold]
 """
     console.print(Panel(panel_content.strip(), title=f"Yhtiöanalyysi: {symbol}", border_style="cyan"))
 
@@ -199,8 +246,8 @@ def export_markdown_report(stock_items, filename="markkinakatsaus.md"):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(f"# Hugo Pinta — Markkinakatsaus\n\n")
         f.write(f"*Päivitetty: {now_str}*\n\n")
-        f.write("| Symboli | Yhtiö | Markkina | Hinta | Päivän muutos | P/E (TTM) | Fwd P/E | Markkina-arvo | Osinko % |\n")
-        f.write("| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+        f.write("| Symboli | Yhtiö | Markkina | Hinta | Päivän muutos | Suositus | Tavoitehinta (Upside) | P/E (TTM) | Fwd P/E | Markkina-arvo | Osinko % |\n")
+        f.write("| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
         for item, static in stock_items:
             sym = static.get("symbol", item["symbol"])
             name = static.get("name", item["name"])
@@ -209,11 +256,15 @@ def export_markdown_report(stock_items, filename="markkinakatsaus.md"):
             price_str = format_currency(item.get("price"), curr)
             chg = item.get("change_pct")
             chg_str = f"{chg:+.2f} %" if chg is not None else "N/A"
+            rec_text, _ = map_recommendation(item.get("recommendation"))
+            target_str = format_target_price(item.get("target_price"), item.get("price"), curr)
+            # Poistetaan rikkaat väritagipätkät markdownista
+            clean_target = target_str.replace("[green]", "").replace("[/green]", "").replace("[red]", "").replace("[/red]", "")
             pe_str = format_pe(item.get("trailing_pe"))
             fwd_pe_str = format_pe(item.get("forward_pe"))
             mcap_str = format_market_cap(item.get("market_cap"), curr)
             div_str = format_dividend(item.get("dividend_yield"))
-            f.write(f"| **{sym}** | {name} | {ex} | {price_str} | {chg_str} | {pe_str} | {fwd_pe_str} | {mcap_str} | {div_str} |\n")
+            f.write(f"| **{sym}** | {name} | {ex} | {price_str} | {chg_str} | **{rec_text}** | {clean_target} | {pe_str} | {fwd_pe_str} | {mcap_str} | {div_str} |\n")
         f.write(f"\n*Raportti generoitu automaattisesti Pythonilla (`uv run tracker.py`).*\n")
     print(f"✅ Markkinakatsaus tallennettu tiedostoon: {filename}")
 
