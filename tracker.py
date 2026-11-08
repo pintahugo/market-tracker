@@ -268,10 +268,71 @@ def export_markdown_report(stock_items, filename="markkinakatsaus.md"):
         f.write(f"\n*Raportti generoitu automaattisesti Pythonilla (`uv run tracker.py`).*\n")
     print(f"✅ Markkinakatsaus tallennettu tiedostoon: {filename}")
 
+def send_ntfy_notification(stock_items, topic="hugo-pinta-markets"):
+    """
+    Lähettää tiiviin, mobiilioptimoidun pörssikatsauksen suoraan puhelimeen ntfy.sh -palvelun kautta.
+    """
+    import urllib.request
+
+    now_str = datetime.now().strftime("%d.%m. klo %H:%M")
+    lines = []
+
+    for item, static in stock_items:
+        name = static.get("name", item["name"]).split(" ")[0]  # Esim. Neste, UPM, NVIDIA, Iren, Nordea
+        curr = item.get("currency", "EUR")
+        price_str = format_currency(item.get("price"), curr)
+        
+        chg = item.get("change_pct")
+        if chg is not None:
+            icon = "🟢" if chg >= 0 else "🔴"
+            chg_str = f"{chg:+.1f}%"
+        else:
+            icon = "⚪️"
+            chg_str = ""
+
+        rec_text, _ = map_recommendation(item.get("recommendation"))
+        
+        # Tavoitehinta ja nousuvara
+        target = item.get("target_price")
+        price = item.get("price")
+        target_info = ""
+        if target and price and price > 0:
+            upside = ((target - price) / price) * 100
+            target_info = f" ↗ {target:.1f} ({upside:+.0f}%)"
+
+        div = item.get("dividend_yield")
+        div_str = f" [Osinko {div*100:.1f}%]" if (div and div > 0.03 and div < 0.25) else ""
+
+        lines.append(f"{icon} {name}: {price_str} ({chg_str}) [{rec_text}]{target_info}{div_str}")
+
+    message_body = "\n".join(lines)
+    url = f"https://ntfy.sh/{topic}"
+
+    req = urllib.request.Request(
+        url,
+        data=message_body.encode("utf-8"),
+        headers={
+            "Title": f"Pörssikatsaus • {now_str}".encode("utf-8"),
+            "Priority": "high",
+            "Tags": "chart_with_upwards_trend,bar_chart",
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                print(f"📲 Ilmoitus lähetetty onnistuneesti puhelimeen (ntfy: {topic})!")
+            else:
+                print(f"⚠️  ntfy vastasi tilakoodilla {resp.status}")
+    except Exception as e:
+        print(f"⚠️  Virhe ilmoituksen lähetyksessä: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="Hugo Pinta Markkinadata & Osakeseuranta")
     parser.add_argument("--detail", "-d", type=str, help="Näytä syväanalyysi tietylle osakesymbolille (esim. NVDA tai NESTE.HE)")
     parser.add_argument("--export", "-e", action="store_true", help="Vie markkinakatsaus Markdown-tiedostoon (markkinakatsaus.md)")
+    parser.add_argument("--notify", "-n", action="store_true", help="Lähetä katsaus push-ilmoituksena puhelimeen (ntfy.sh)")
     parser.add_argument("--add", "-a", type=str, help="Lisää uusi symboli tilapäisesti mukaan seurantaan")
     args = parser.parse_args()
 
@@ -299,6 +360,9 @@ def main():
         results.append((data, stock))
 
     print_rich_table(results)
+
+    if args.notify:
+        send_ntfy_notification(results)
 
     if args.export:
         export_markdown_report(results)

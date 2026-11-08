@@ -1,0 +1,25 @@
+name: Päivittäinen Pörssikatsaus (Push-ilmoitus)
+
+on:
+  schedule:
+    # Ma-Pe klo 08:00 UTC = klo 10:00 Suomen aikaa (Helsingin pörssin avaus)
+    - cron: '0 8 * * 1-5'
+    # Ma-Pe klo 16:35 UTC = klo 18:35 Suomen aikaa (Helsingin pörssin päätös)
+    - cron: '35 16 * * 1-5'
+  workflow_dispatch: # Mahdollistaa ajon manuaalisesti yhdellä klikkauksella GitHubista
+
+jobs:
+  market-briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hae koodivarasto
+        uses: actions/checkout@v4
+
+      - name: Asenna uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Aja pörssikatsaus ja lähetä ilmoitus puhelimeen
+        run: |
+          uv run tracker.py --notify --export
