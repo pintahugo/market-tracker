@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Hugo Pinta - Markkinadata & Osakeseuranta
-Seuraa valittuja osakkeita (Neste, UPM, Nvidia, Iren, Nordea, Huhtamäki)
-ja tulostaa reaaliaikaiset kurssit sekä keskeiset valuaatiokertoimet.
+Seuraa valittuja osakkeita ja tulostaa reaaliaikaiset kurssit,
+valuaatiokertoimet sekä sijoitussignaalit (aliarvostusanalyysi).
 """
 
 import sys
@@ -17,6 +17,8 @@ DEFAULT_STOCKS = [
     {"symbol": "IREN", "name": "Iren (Iris Energy)", "exchange": "NASDAQ"},
     {"symbol": "NDA-FI.HE", "name": "Nordea Bank Abp", "exchange": "Helsinki (OMXH)"},
     {"symbol": "HUH1V.HE", "name": "Huhtamäki Oyj", "exchange": "Helsinki (OMXH)"},
+    {"symbol": "TELIA.ST", "name": "Telia Company", "exchange": "Nasdaq Stockholm"},
+    {"symbol": "INTC", "name": "Intel Corporation", "exchange": "NASDAQ"},
 ]
 
 def format_currency(val, currency="EUR"):
@@ -73,6 +75,98 @@ def map_recommendation(rec_key):
         return ("MYY", "bold red")
     
     return (str(rec_key).upper(), "white")
+
+def compute_signal(item):
+    """
+    Laskee sijoitussignaalin (OSTA NYT / SEURAA / ODOTA) useista tekijöistä:
+    - Analyytikkojen konsensus-suositus
+    - Nousuvara tavoitehintaan
+    - Sijainti 52 viikon vaihteluvälillä (lähellä pohjia = kiinnostava)
+    - Forward P/E vs TTM P/E (odotettu tuloskasvutrendi)
+
+    Palauttaa: (signaali_teksti, selitys_lista, pisteet)
+    """
+    score = 0
+    reasons = []
+
+    # 1. Analyytikkokonsensus
+    rec = str(item.get("recommendation") or "").lower().replace("_", "").replace(" ", "")
+    if "strongbuy" in rec or "buy" in rec:
+        score += 2
+        reasons.append("✅ Analyytikot suosittavat ostamaan")
+    elif "outperform" in rec or "overweight" in rec:
+        score += 1
+        reasons.append("✅ Analyytikot: ylituotto-odotus")
+    elif "hold" in rec or "neutral" in rec:
+        reasons.append("➡️  Analyytikot: pidä")
+    elif "underperform" in rec or "underweight" in rec or "sell" in rec:
+        score -= 1
+        reasons.append("⚠️  Analyytikot suosittavat myymään")
+
+    # 2. Nousuvara tavoitehintaan
+    target = item.get("target_price")
+    price = item.get("price")
+    if target and price and price > 0:
+        upside = ((target - price) / price) * 100
+        if upside >= 20:
+            score += 2
+            reasons.append(f"✅ Suuri nousuvara tavoitehintaan: +{upside:.0f}%")
+        elif upside >= 10:
+            score += 1
+            reasons.append(f"✅ Kohtalainen nousuvara: +{upside:.0f}%")
+        elif upside < -5:
+            score -= 1
+            reasons.append(f"⚠️  Hinta ylittää tavoitehinnan ({upside:.0f}%)")
+
+    # 3. Sijainti 52 viikon vaihteluvälillä
+    low52 = item.get("fifty_two_low")
+    high52 = item.get("fifty_two_high")
+    if low52 and high52 and price and high52 > low52:
+        position = (price - low52) / (high52 - low52)  # 0 = pohja, 1 = huippu
+        if position <= 0.25:
+            score += 2
+            reasons.append(f"✅ Hinta lähellä 52vk pohjia ({position*100:.0f}% vaihteluvälillä)")
+        elif position <= 0.40:
+            score += 1
+            reasons.append(f"✅ Hinta selvästi alle vuosihuipun ({position*100:.0f}% vaihteluvälillä)")
+        elif position >= 0.85:
+            score -= 1
+            reasons.append(f"⚠️  Hinta lähellä 52vk huippuja ({position*100:.0f}% vaihteluvälillä)")
+
+    # 4. Forward P/E vs TTM P/E (odotettu tuloskasvutrendi)
+    pe = item.get("trailing_pe")
+    fwd_pe = item.get("forward_pe")
+    if pe and fwd_pe and pe > 0 and fwd_pe > 0:
+        if fwd_pe < pe * 0.80:
+            score += 1
+            reasons.append(f"✅ Tuloskasvu odotettu: Fwd P/E ({fwd_pe:.1f}) < TTM P/E ({pe:.1f})")
+        elif fwd_pe > pe * 1.20:
+            score -= 1
+            reasons.append(f"⚠️  Tuloslasku odotettu: Fwd P/E ({fwd_pe:.1f}) > TTM P/E ({pe:.1f})")
+
+    # 5. Absoluuttinen P/E — erityisen matala = kiinnostava
+    if pe and 0 < pe < 12:
+        score += 1
+        reasons.append(f"✅ Matala P/E ({pe:.1f}) — mahdollinen aliarvostus")
+    elif pe and pe > 50:
+        reasons.append(f"ℹ️  Korkea P/E ({pe:.1f}) — kasvuosake tai kallis")
+
+    # Kokonaissignaali
+    if score >= 4:
+        signal = "🟢 OSTA NYT"
+        signal_color = "bold green"
+    elif score >= 2:
+        signal = "🟡 SEURAA"
+        signal_color = "yellow"
+    elif score >= 0:
+        signal = "⚪ NEUTRAALI"
+        signal_color = "white"
+    else:
+        signal = "🔴 ODOTA"
+        signal_color = "bold red"
+
+    return signal, signal_color, score, reasons
+
 
 def format_target_price(target, current_price, currency="EUR"):
     if target is None or current_price is None or current_price <= 0:
@@ -157,6 +251,7 @@ def print_rich_table(stock_items):
     table.add_column("Markkina", style="dim")
     table.add_column("Hinta", justify="right", style="bold white")
     table.add_column("Päivän muutos", justify="right")
+    table.add_column("Signaali", justify="center")
     table.add_column("Suositus", justify="center")
     table.add_column("Tavoitehinta", justify="right")
     table.add_column("P/E (TTM)", justify="right")
@@ -183,6 +278,10 @@ def print_rich_table(stock_items):
         else:
             chg_str = "N/A"
 
+        # Sijoitussignaali
+        signal, signal_color, score, _ = compute_signal(item)
+        signal_str = f"[{signal_color}]{signal}[/{signal_color}]"
+
         # Suositus (Osta/Myy/Lisää/Vähennä/Pidä)
         rec_text, rec_color = map_recommendation(item.get("recommendation"))
         rec_str = f"[{rec_color}]{rec_text}[/{rec_color}]"
@@ -202,10 +301,50 @@ def print_rich_table(stock_items):
         else:
             range52 = "N/A"
 
-        table.add_row(sym, name, ex, price_str, chg_str, rec_str, target_str, pe_str, fwd_pe_str, mcap_str, div_str, range52)
+        table.add_row(sym, name, ex, price_str, chg_str, signal_str, rec_str, target_str, pe_str, fwd_pe_str, mcap_str, div_str, range52)
 
     console.print(table)
     console.print()
+
+
+def print_signals_view(stock_items):
+    """Tulostaa yksityiskohtaisen sijoitussignaalianalyysin kaikille osakkeille."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console()
+    now_str = datetime.now().strftime("%d.%m.%Y klo %H:%M")
+
+    console.print()
+    console.print(Panel(
+        f"[bold yellow]💡 SIJOITUSSIGNAALIANALYYSI[/bold yellow]\n[dim]Päivitetty: {now_str} — Aliarvostus & ostohetki-indikaattorit[/dim]",
+        border_style="yellow"
+    ))
+
+    # Järjestetään pisteiden mukaan (paras ensin)
+    scored = []
+    for item, static in stock_items:
+        signal, signal_color, score, reasons = compute_signal(item)
+        scored.append((score, signal, signal_color, reasons, item, static))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    for score, signal, signal_color, reasons, item, static in scored:
+        sym = static.get("symbol", item["symbol"])
+        name = static.get("name", item["name"])
+        curr = item.get("currency", "EUR")
+        price_str = format_currency(item.get("price"), curr)
+
+        reasons_text = "\n".join(f"  {r}" for r in reasons) if reasons else "  ℹ️  Ei riittävästi dataa analyysiin"
+
+        console.print(Panel(
+            f"[bold white]{name} ({sym})[/bold white]  •  Hinta: [bold]{price_str}[/bold]  •  Pisteet: [bold]{score:+d}[/bold]\n\n{reasons_text}",
+            title=f"[{signal_color}]{signal}[/{signal_color}]",
+            border_style=signal_color if "green" in signal_color else ("yellow" if "yellow" in signal_color else "dim"),
+        ))
+
+    console.print("[dim]Huom: Signaali on kvantitatiivinen indikaattori, ei sijoitusneuvonta. Tee aina oma analyysi.[/dim]\n")
 
 def print_detail_view(symbol):
     from rich.console import Console
@@ -305,6 +444,18 @@ def send_ntfy_notification(stock_items, topic="hugo-pinta-markets"):
 
         lines.append(f"{icon} {name}: {price_str} ({chg_str}) [{rec_text}]{target_info}{div_str}")
 
+    # Lisätään loppuun parhaat sijoitussignaalit (vain OSTA NYT tai SEURAA)
+    buy_signals = []
+    for item, static in stock_items:
+        signal, _, score, _ = compute_signal(item)
+        if score >= 2:
+            name_short = static.get("name", item["name"]).split(" ")[0]
+            buy_signals.append(f"💡 {name_short}: {signal}")
+    if buy_signals:
+        lines.append("")
+        lines.append("— Sijoitussignaalit —")
+        lines.extend(buy_signals)
+
     message_body = "\n".join(lines)
     url = f"https://ntfy.sh/{topic}"
 
@@ -334,6 +485,7 @@ def main():
     parser.add_argument("--export", "-e", action="store_true", help="Vie markkinakatsaus Markdown-tiedostoon (markkinakatsaus.md)")
     parser.add_argument("--notify", "-n", action="store_true", help="Lähetä katsaus push-ilmoituksena puhelimeen (ntfy.sh)")
     parser.add_argument("--add", "-a", type=str, help="Lisää uusi symboli tilapäisesti mukaan seurantaan")
+    parser.add_argument("--signals", "-s", action="store_true", help="Näytä yksityiskohtainen sijoitussignaalianalyysi (aliarvostus & ostohetki)")
     args = parser.parse_args()
 
     # Tarkistetaan asennetut paketit
@@ -360,6 +512,9 @@ def main():
         results.append((data, stock))
 
     print_rich_table(results)
+
+    if args.signals:
+        print_signals_view(results)
 
     if args.notify:
         send_ntfy_notification(results)
