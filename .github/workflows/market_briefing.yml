@@ -2,10 +2,12 @@ name: Päivittäinen Pörssikatsaus (Push-ilmoitus)
 
 on:
   schedule:
-    # Ma-Pe klo 07:00 UTC = klo 09:00 Suomen talviaikaa (EET = UTC+2) — Helsingin pörssin avaus
-    - cron: '0 7 * * 1-5'
-    # Ma-Pe klo 15:30 UTC = klo 17:30 Suomen talviaikaa (EET = UTC+2) — Helsingin pörssin sulkeutuminen
-    - cron: '30 15 * * 1-5'
+    # 🌅 AAMULÄHETYS — Ma-Pe klo 06:55 UTC = klo 08:55 Suomen talviaikaa (EET = UTC+2)
+    # Helsingin pörssi aukeaa klo 09:00 — ilmoitus tulee 5 min ennen!
+    - cron: '55 6 * * 1-5'
+    # 🌆 ILTAKATSAUS — Ma-Pe klo 15:35 UTC = klo 17:35 Suomen talviaikaa (EET = UTC+2)
+    # Helsingin pörssi sulkeutuu klo 17:30 — päivän yhteenveto 5 min jälkeen
+    - cron: '35 15 * * 1-5'
   workflow_dispatch: # Mahdollistaa ajon manuaalisesti yhdellä klikkauksella GitHubista
 
 jobs:
@@ -20,6 +22,24 @@ jobs:
         with:
           version: "latest"
 
-      - name: Aja pörssikatsaus ja lähetä ilmoitus puhelimeen
+      - name: Määritä ajastustyyppi (aamu vai ilta)
+        id: schedule_type
         run: |
-          uv run tracker.py --notify --export
+          HOUR=$(date -u +%H)
+          MINUTE=$(date -u +%M)
+          echo "UTC aika: ${HOUR}:${MINUTE}"
+          if [ "$HOUR" -lt "12" ]; then
+            echo "type=morning" >> $GITHUB_OUTPUT
+            echo "▶ Aamulähetys"
+          else
+            echo "type=evening" >> $GITHUB_OUTPUT
+            echo "▶ Iltakatsaus"
+          fi
+
+      - name: 🌅 Aamulähetys — Pörssi aukeaa 5min päästä
+        if: steps.schedule_type.outputs.type == 'morning'
+        run: uv run tracker.py --morning --export
+
+      - name: 🌆 Iltakatsaus — Päivän yhteenveto
+        if: steps.schedule_type.outputs.type == 'evening'
+        run: uv run tracker.py --evening --export

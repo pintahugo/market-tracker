@@ -407,44 +407,198 @@ def export_markdown_report(stock_items, filename="markkinakatsaus.md"):
         f.write(f"\n*Raportti generoitu automaattisesti Pythonilla (`uv run tracker.py`).*\n")
     print(f"✅ Markkinakatsaus tallennettu tiedostoon: {filename}")
 
-def send_ntfy_notification(stock_items, topic="hugo-pinta-markets"):
-    """
-    Lähettää tiiviin, mobiilioptimoidun pörssikatsauksen suoraan puhelimeen ntfy.sh -palvelun kautta.
-    """
-    import urllib.request
+def fetch_stock_news(symbol, max_items=2):
+    """Hakee viimeisimmät uutisotsikoita yfinancesta tietylle osakkeelle."""
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(symbol)
+        news = ticker.news or []
+        headlines = []
+        for article in news[:max_items]:
+            content = article.get("content", {})
+            title = content.get("title") or article.get("title", "")
+            if title:
+                headlines.append(title)
+        return headlines
+    except Exception:
+        return []
 
+
+def _send_ntfy(title, body, topic="hugo-pinta-markets", tags="chart_with_upwards_trend,bar_chart", priority="high"):
+    """Sisäinen apufunktio ntfy-viestin lähettämiseen."""
+    import urllib.request
+    url = f"https://ntfy.sh/{topic}"
+    req = urllib.request.Request(
+        url,
+        data=body.encode("utf-8"),
+        headers={
+            "Title": title.encode("utf-8"),
+            "Priority": priority,
+            "Tags": tags,
+        },
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                print(f"📲 Ilmoitus lähetetty puhelimeen (ntfy: {topic})!")
+            else:
+                print(f"⚠️  ntfy vastasi tilakoodilla {resp.status}")
+    except Exception as e:
+        print(f"⚠️  Virhe ilmoituksen lähetyksessä: {e}")
+
+
+def send_morning_notification(stock_items, topic="hugo-pinta-markets"):
+    """
+    🌅 AAMULÄHETYS (klo 08:55) — Pörssi aukeaa 5 minuutin päästä!
+    Näyttää eilisen sulkukurssit, sijoitussignaalit ja mitä tänään kannattaa seurata.
+    """
+    now_str = datetime.now().strftime("%d.%m.%Y")
+    lines = []
+    lines.append(f"Pörssi aukeaa klo 09:00 — {now_str}")
+    lines.append("")
+
+    # Osakkeet + signaali
+    for item, static in stock_items:
+        name = static.get("name", item["name"]).split(" ")[0]
+        curr = item.get("currency", "EUR")
+        price_str = format_currency(item.get("price"), curr)
+        signal, _, score, _ = compute_signal(item)
+
+        # Signaali-ikoni
+        if score >= 4:
+            sig_icon = "🟢"
+        elif score >= 2:
+            sig_icon = "🟡"
+        else:
+            sig_icon = "⚪"
+
+        rec_text, _ = map_recommendation(item.get("recommendation"))
+        lines.append(f"{sig_icon} {name}: {price_str} [{rec_text}]")
+
+    # Parhaat ostokohteet tänään
+    lines.append("")
+    lines.append("💡 Tänään seuraa:")
+    watch_list = []
+    for item, static in stock_items:
+        signal, _, score, reasons = compute_signal(item)
+        if score >= 2:
+            name_short = static.get("name", item["name"]).split(" ")[0]
+            watch_list.append(f"  • {name_short}: {signal}")
+    if watch_list:
+        lines.extend(watch_list)
+    else:
+        lines.append("  • Ei erityisiä signaaleita tänään")
+
+    _send_ntfy(
+        title=f"🌅 Pörssiaamun katsaus • {now_str}",
+        body="\n".join(lines),
+        topic=topic,
+        tags="sunrise,chart_with_upwards_trend",
+        priority="high"
+    )
+
+
+def send_evening_notification(stock_items, topic="hugo-pinta-markets"):
+    """
+    🌆 ILTAKATSAUS (klo 17:35) — Päivän yhteenveto.
+    Voittajat & häviäjät, selitykset uutisista, sijoitussuositukset.
+    """
+    now_str = datetime.now().strftime("%d.%m.%Y")
+    lines = []
+
+    # Lajitellaan päivän muutoksen mukaan
+    sorted_items = sorted(
+        stock_items,
+        key=lambda x: x[0].get("change_pct") or 0,
+        reverse=True
+    )
+
+    # Voittajat (muutos >= +0.5%)
+    winners = [(i, s) for i, s in sorted_items if (i.get("change_pct") or 0) >= 0.5]
+    losers  = [(i, s) for i, s in sorted_items if (i.get("change_pct") or 0) <= -0.5]
+    flat    = [(i, s) for i, s in sorted_items if abs(i.get("change_pct") or 0) < 0.5]
+
+    if winners:
+        lines.append("📈 Päivän nousijat:")
+        for item, static in winners:
+            name = static.get("name", item["name"]).split(" ")[0]
+            curr = item.get("currency", "EUR")
+            chg = item.get("change_pct", 0)
+            price_str = format_currency(item.get("price"), curr)
+            lines.append(f"  🟢 {name}: {price_str} ({chg:+.1f}%)")
+
+    if losers:
+        lines.append("")
+        lines.append("📉 Päivän laskijat:")
+        for item, static in losers:
+            name = static.get("name", item["name"]).split(" ")[0]
+            curr = item.get("currency", "EUR")
+            chg = item.get("change_pct", 0)
+            price_str = format_currency(item.get("price"), curr)
+            lines.append(f"  🔴 {name}: {price_str} ({chg:+.1f}%)")
+
+    if flat:
+        lines.append("")
+        lines.append("➡️  Tasainen päivä:")
+        flat_names = [static.get("name", item["name"]).split(" ")[0] for item, static in flat]
+        lines.append(f"  {', '.join(flat_names)}")
+
+    # Uutisotsikoita isommille liikkeille (>1.5% muutos)
+    significant = [(i, s) for i, s in stock_items if abs(i.get("change_pct") or 0) >= 1.5]
+    if significant:
+        news_lines = []
+        for item, static in significant[:3]:  # max 3 osaketta
+            sym = static.get("symbol", item["symbol"])
+            name = static.get("name", item["name"]).split(" ")[0]
+            headlines = fetch_stock_news(sym, max_items=1)
+            if headlines:
+                news_lines.append(f"  📰 {name}: {headlines[0][:80]}")
+        if news_lines:
+            lines.append("")
+            lines.append("🗞️  Päivän uutiset:")
+            lines.extend(news_lines)
+
+    # Sijoitussuositukset
+    lines.append("")
+    lines.append("💡 Sijoitussignaalit:")
+    for item, static in stock_items:
+        signal, _, score, _ = compute_signal(item)
+        if score >= 2:
+            name_short = static.get("name", item["name"]).split(" ")[0]
+            rec_text, _ = map_recommendation(item.get("recommendation"))
+            lines.append(f"  {signal} {name_short} [{rec_text}]")
+
+    _send_ntfy(
+        title=f"🌆 Päivän pörssikatsaus • {now_str}",
+        body="\n".join(lines),
+        topic=topic,
+        tags="bar_chart,bell",
+        priority="default"
+    )
+
+
+def send_ntfy_notification(stock_items, topic="hugo-pinta-markets"):
+    """Perus push-ilmoitus (yhteensopivuus vanhaan --notify flagiin)."""
     now_str = datetime.now().strftime("%d.%m. klo %H:%M")
     lines = []
 
     for item, static in stock_items:
-        name = static.get("name", item["name"]).split(" ")[0]  # Esim. Neste, UPM, NVIDIA, Iren, Nordea
+        name = static.get("name", item["name"]).split(" ")[0]
         curr = item.get("currency", "EUR")
         price_str = format_currency(item.get("price"), curr)
-        
         chg = item.get("change_pct")
-        if chg is not None:
-            icon = "🟢" if chg >= 0 else "🔴"
-            chg_str = f"{chg:+.1f}%"
-        else:
-            icon = "⚪️"
-            chg_str = ""
-
+        icon = ("🟢" if chg >= 0 else "🔴") if chg is not None else "⚪️"
+        chg_str = f"{chg:+.1f}%" if chg is not None else ""
         rec_text, _ = map_recommendation(item.get("recommendation"))
-        
-        # Tavoitehinta ja nousuvara
         target = item.get("target_price")
         price = item.get("price")
         target_info = ""
         if target and price and price > 0:
             upside = ((target - price) / price) * 100
             target_info = f" ↗ {target:.1f} ({upside:+.0f}%)"
+        lines.append(f"{icon} {name}: {price_str} ({chg_str}) [{rec_text}]{target_info}")
 
-        div = item.get("dividend_yield")
-        div_str = f" [Osinko {div*100:.1f}%]" if (div and div > 0.03 and div < 0.25) else ""
-
-        lines.append(f"{icon} {name}: {price_str} ({chg_str}) [{rec_text}]{target_info}{div_str}")
-
-    # Lisätään loppuun parhaat sijoitussignaalit (vain OSTA NYT tai SEURAA)
     buy_signals = []
     for item, static in stock_items:
         signal, _, score, _ = compute_signal(item)
@@ -456,34 +610,19 @@ def send_ntfy_notification(stock_items, topic="hugo-pinta-markets"):
         lines.append("— Sijoitussignaalit —")
         lines.extend(buy_signals)
 
-    message_body = "\n".join(lines)
-    url = f"https://ntfy.sh/{topic}"
-
-    req = urllib.request.Request(
-        url,
-        data=message_body.encode("utf-8"),
-        headers={
-            "Title": f"Pörssikatsaus • {now_str}".encode("utf-8"),
-            "Priority": "high",
-            "Tags": "chart_with_upwards_trend,bar_chart",
-        },
-        method="POST"
+    _send_ntfy(
+        title=f"Pörssikatsaus • {now_str}",
+        body="\n".join(lines),
+        topic=topic
     )
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status == 200:
-                print(f"📲 Ilmoitus lähetetty onnistuneesti puhelimeen (ntfy: {topic})!")
-            else:
-                print(f"⚠️  ntfy vastasi tilakoodilla {resp.status}")
-    except Exception as e:
-        print(f"⚠️  Virhe ilmoituksen lähetyksessä: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Hugo Pinta Markkinadata & Osakeseuranta")
     parser.add_argument("--detail", "-d", type=str, help="Näytä syväanalyysi tietylle osakesymbolille (esim. NVDA tai NESTE.HE)")
     parser.add_argument("--export", "-e", action="store_true", help="Vie markkinakatsaus Markdown-tiedostoon (markkinakatsaus.md)")
-    parser.add_argument("--notify", "-n", action="store_true", help="Lähetä katsaus push-ilmoituksena puhelimeen (ntfy.sh)")
+    parser.add_argument("--notify", "-n", action="store_true", help="Lähetä perus push-ilmoitus puhelimeen (ntfy.sh)")
+    parser.add_argument("--morning", action="store_true", help="🌅 Lähetä aamulähetys — pörssi aukeaa 5min päästä")
+    parser.add_argument("--evening", action="store_true", help="🌆 Lähetä iltakatsaus — päivän yhteenveto, voittajat & häviäjät, uutiset")
     parser.add_argument("--add", "-a", type=str, help="Lisää uusi symboli tilapäisesti mukaan seurantaan")
     parser.add_argument("--signals", "-s", action="store_true", help="Näytä yksityiskohtainen sijoitussignaalianalyysi (aliarvostus & ostohetki)")
     args = parser.parse_args()
@@ -516,7 +655,11 @@ def main():
     if args.signals:
         print_signals_view(results)
 
-    if args.notify:
+    if args.morning:
+        send_morning_notification(results)
+    elif args.evening:
+        send_evening_notification(results)
+    elif args.notify:
         send_ntfy_notification(results)
 
     if args.export:
