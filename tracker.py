@@ -9,7 +9,7 @@ import sys
 import argparse
 from datetime import datetime
 
-# Määritellään Hugon seuraamat osakkeet
+# Määritellään Hugon seuraamat osakkeet (omistuksessa / aktiivisessa seurannassa)
 DEFAULT_STOCKS = [
     {"symbol": "NESTE.HE", "name": "Neste Oyj", "exchange": "Helsinki (OMXH)"},
     {"symbol": "UPM.HE", "name": "UPM-Kymmene", "exchange": "Helsinki (OMXH)"},
@@ -19,6 +19,20 @@ DEFAULT_STOCKS = [
     {"symbol": "HUH1V.HE", "name": "Huhtamäki Oyj", "exchange": "Helsinki (OMXH)"},
     {"symbol": "TELIA.ST", "name": "Telia Company", "exchange": "Nasdaq Stockholm"},
     {"symbol": "INTC", "name": "Intel Corporation", "exchange": "NASDAQ"},
+]
+
+# Mahdollisuusuniversumi — osakkeet joita screenataan ostomahdollisuuksien varalta.
+# Ilmoitus tulee vain jos signaali on riittävän vahva (OSTA NYT).
+OPPORTUNITY_STOCKS = [
+    {"symbol": "TSM", "name": "Taiwan Semiconductor", "exchange": "NYSE"},
+    {"symbol": "ASML", "name": "ASML Holding", "exchange": "NASDAQ"},
+    {"symbol": "MSFT", "name": "Microsoft", "exchange": "NASDAQ"},
+    {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ"},
+    {"symbol": "NOKIA.HE", "name": "Nokia Oyj", "exchange": "Helsinki (OMXH)"},
+    {"symbol": "FORTUM.HE", "name": "Fortum Oyj", "exchange": "Helsinki (OMXH)"},
+    {"symbol": "SAMPO.HE", "name": "Sampo Oyj", "exchange": "Helsinki (OMXH)"},
+    {"symbol": "AMD", "name": "AMD", "exchange": "NASDAQ"},
+    {"symbol": "BRKB", "name": "Berkshire Hathaway", "exchange": "NYSE"},
 ]
 
 def format_currency(val, currency="EUR"):
@@ -151,7 +165,7 @@ def compute_signal(item):
     elif pe and pe > 50:
         reasons.append(f"ℹ️  Korkea P/E ({pe:.1f}) — kasvuosake tai kallis")
 
-    # Kokonaissignaali
+    # Kokonaissignaali — myös myyntisignaalit
     if score >= 4:
         signal = "🟢 OSTA NYT"
         signal_color = "bold green"
@@ -161,11 +175,38 @@ def compute_signal(item):
     elif score >= 0:
         signal = "⚪ NEUTRAALI"
         signal_color = "white"
-    else:
+    elif score == -1:
         signal = "🔴 ODOTA"
+        signal_color = "bold red"
+    elif score == -2:
+        signal = "⚠️ HARKITSE MYYNTIÄ"
+        signal_color = "bold red"
+    else:
+        signal = "🚨 MYYNTISUOSITUS"
         signal_color = "bold red"
 
     return signal, signal_color, score, reasons
+
+
+def screen_opportunities(opportunity_stocks=None, min_score=3):
+    """
+    Screenaa OPPORTUNITY_STOCKS-listalta osakkeet, joilla on vahva ostomahdollisuus.
+    Hakee datan ja palauttaa vain ne joiden signaalipistemäärä >= min_score.
+    """
+    if opportunity_stocks is None:
+        opportunity_stocks = OPPORTUNITY_STOCKS
+
+    print("Screenataan ostomahdollisuuksia mahdollisuusuniversumista...")
+    hits = []
+    for stock in opportunity_stocks:
+        try:
+            data = fetch_stock_data(stock["symbol"])
+            signal, signal_color, score, reasons = compute_signal(data)
+            if score >= min_score:
+                hits.append((data, stock, signal, score, reasons))
+        except Exception:
+            pass
+    return hits
 
 
 def format_target_price(target, current_price, currency="EUR"):
@@ -451,7 +492,7 @@ def _send_ntfy(title, body, topic="hugo-pinta-markets", tags="chart_with_upwards
 def send_morning_notification(stock_items, topic="hugo-pinta-markets"):
     """
     🌅 AAMULÄHETYS (klo 08:55) — Pörssi aukeaa 5 minuutin päästä!
-    Näyttää eilisen sulkukurssit, sijoitussignaalit ja mitä tänään kannattaa seurata.
+    Näyttää eilisen sulkukurssit, sijoitussignaalit, myyntivaroitukset ja uudet ostokohteet.
     """
     now_str = datetime.now().strftime("%d.%m.%Y")
     lines = []
@@ -464,31 +505,63 @@ def send_morning_notification(stock_items, topic="hugo-pinta-markets"):
         curr = item.get("currency", "EUR")
         price_str = format_currency(item.get("price"), curr)
         signal, _, score, _ = compute_signal(item)
-
-        # Signaali-ikoni
         if score >= 4:
             sig_icon = "🟢"
         elif score >= 2:
             sig_icon = "🟡"
+        elif score <= -2:
+            sig_icon = "🚨"
         else:
             sig_icon = "⚪"
-
         rec_text, _ = map_recommendation(item.get("recommendation"))
         lines.append(f"{sig_icon} {name}: {price_str} [{rec_text}]")
 
-    # Parhaat ostokohteet tänään
-    lines.append("")
-    lines.append("💡 Tänään seuraa:")
-    watch_list = []
+    # Myyntivaroitukset omistuksista
+    sell_warnings = []
     for item, static in stock_items:
         signal, _, score, reasons = compute_signal(item)
+        if score <= -2:
+            name_short = static.get("name", item["name"]).split(" ")[0]
+            sell_warnings.append(f"  🚨 {name_short}: {signal}")
+    if sell_warnings:
+        lines.append("")
+        lines.append("⚠️ Myyntivaroitukset:")
+        lines.extend(sell_warnings)
+
+    # Parhaat ostokohteet omista osakkeista
+    buy_list = []
+    for item, static in stock_items:
+        signal, _, score, _ = compute_signal(item)
         if score >= 2:
             name_short = static.get("name", item["name"]).split(" ")[0]
-            watch_list.append(f"  • {name_short}: {signal}")
-    if watch_list:
-        lines.extend(watch_list)
+            buy_list.append(f"  • {name_short}: {signal}")
+
+    # Uudet ostomahdollisuudet mahdollisuusuniversumista
+    opportunities = screen_opportunities(min_score=3)
+    opp_lines = []
+    for data, stock, signal, score, reasons in opportunities:
+        name_short = stock.get("name", data["name"]).split(" ")[0]
+        curr = data.get("currency", "EUR")
+        price_str = format_currency(data.get("price"), curr)
+        target = data.get("target_price")
+        price = data.get("price")
+        upside_str = ""
+        if target and price and price > 0:
+            upside = ((target - price) / price) * 100
+            upside_str = f" ↗ +{upside:.0f}%"
+        opp_lines.append(f"  🎯 {name_short}: {price_str}{upside_str} [{signal}]")
+
+    if buy_list or opp_lines:
+        lines.append("")
+        lines.append("💡 Tänään seuraa:")
+        lines.extend(buy_list)
+        if opp_lines:
+            lines.append("")
+            lines.append("🆕 Uudet ostomahdollisuudet:")
+            lines.extend(opp_lines)
     else:
-        lines.append("  • Ei erityisiä signaaleita tänään")
+        lines.append("")
+        lines.append("💡 Ei erityisiä signaaleita tänään")
 
     _send_ntfy(
         title=f"🌅 Pörssiaamun katsaus • {now_str}",
@@ -502,19 +575,13 @@ def send_morning_notification(stock_items, topic="hugo-pinta-markets"):
 def send_evening_notification(stock_items, topic="hugo-pinta-markets"):
     """
     🌆 ILTAKATSAUS (klo 17:35) — Päivän yhteenveto.
-    Voittajat & häviäjät, selitykset uutisista, sijoitussuositukset.
+    Voittajat & häviäjät, uutisselitykset, myyntivaroitukset ja uudet ostokohteet.
     """
     now_str = datetime.now().strftime("%d.%m.%Y")
     lines = []
 
     # Lajitellaan päivän muutoksen mukaan
-    sorted_items = sorted(
-        stock_items,
-        key=lambda x: x[0].get("change_pct") or 0,
-        reverse=True
-    )
-
-    # Voittajat (muutos >= +0.5%)
+    sorted_items = sorted(stock_items, key=lambda x: x[0].get("change_pct") or 0, reverse=True)
     winners = [(i, s) for i, s in sorted_items if (i.get("change_pct") or 0) >= 0.5]
     losers  = [(i, s) for i, s in sorted_items if (i.get("change_pct") or 0) <= -0.5]
     flat    = [(i, s) for i, s in sorted_items if abs(i.get("change_pct") or 0) < 0.5]
@@ -548,7 +615,7 @@ def send_evening_notification(stock_items, topic="hugo-pinta-markets"):
     significant = [(i, s) for i, s in stock_items if abs(i.get("change_pct") or 0) >= 1.5]
     if significant:
         news_lines = []
-        for item, static in significant[:3]:  # max 3 osaketta
+        for item, static in significant[:3]:
             sym = static.get("symbol", item["symbol"])
             name = static.get("name", item["name"]).split(" ")[0]
             headlines = fetch_stock_news(sym, max_items=1)
@@ -559,15 +626,53 @@ def send_evening_notification(stock_items, topic="hugo-pinta-markets"):
             lines.append("🗞️  Päivän uutiset:")
             lines.extend(news_lines)
 
-    # Sijoitussuositukset
-    lines.append("")
-    lines.append("💡 Sijoitussignaalit:")
+    # Myyntivaroitukset omistuksista
+    sell_warnings = []
+    for item, static in stock_items:
+        signal, _, score, reasons = compute_signal(item)
+        if score <= -2:
+            name_short = static.get("name", item["name"]).split(" ")[0]
+            # Lyhyin selitys myyntisignaalin syystä
+            top_reason = next((r for r in reasons if "⚠️" in r), "")
+            sell_warnings.append(f"  🚨 {name_short}: {signal}")
+            if top_reason:
+                sell_warnings.append(f"     {top_reason.strip()}")
+
+    if sell_warnings:
+        lines.append("")
+        lines.append("⚠️ MYYNTIVAROITUKSET (omistuksistasi):")
+        lines.extend(sell_warnings)
+
+    # Sijoitussignaalit omistuksista
+    buy_signals = []
     for item, static in stock_items:
         signal, _, score, _ = compute_signal(item)
         if score >= 2:
             name_short = static.get("name", item["name"]).split(" ")[0]
             rec_text, _ = map_recommendation(item.get("recommendation"))
-            lines.append(f"  {signal} {name_short} [{rec_text}]")
+            buy_signals.append(f"  {signal} {name_short} [{rec_text}]")
+
+    if buy_signals:
+        lines.append("")
+        lines.append("💡 Sijoitussignaalit (omat):")
+        lines.extend(buy_signals)
+
+    # Uudet ostomahdollisuudet mahdollisuusuniversumista
+    opportunities = screen_opportunities(min_score=3)
+    if opportunities:
+        lines.append("")
+        lines.append("🎯 Uudet ostomahdollisuudet:")
+        for data, stock, signal, score, reasons in opportunities:
+            name_short = stock.get("name", data["name"]).split(" ")[0]
+            curr = data.get("currency", "EUR")
+            price_str = format_currency(data.get("price"), curr)
+            target = data.get("target_price")
+            price = data.get("price")
+            upside_str = ""
+            if target and price and price > 0:
+                upside = ((target - price) / price) * 100
+                upside_str = f" ↗ +{upside:.0f}%"
+            lines.append(f"  🟢 {name_short}: {price_str}{upside_str} [{signal}]")
 
     _send_ntfy(
         title=f"🌆 Päivän pörssikatsaus • {now_str}",
